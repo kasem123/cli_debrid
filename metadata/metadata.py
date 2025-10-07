@@ -20,6 +20,7 @@ from utilities.settings import get_setting
 from cli_battery.app.direct_api import DirectAPI
 from cli_battery.app.trakt_metadata import TraktMetadata
 from cli_battery.app.database import DatabaseManager
+from metadata.movie_dataset import get_movie_by_imdb
 from database.database_reading import get_media_item_presence, get_all_media_items, get_show_episode_identifiers_from_db, get_media_item_ids
 
 # Initialize DirectAPI at module level
@@ -1073,25 +1074,44 @@ def refresh_release_dates():
             new_airtime = None
 
             if media_type == 'movie':
-                metadata, source = DirectAPI.get_movie_metadata(imdb_id)
-                if not metadata:
-                    logging.warning(f"No metadata found for movie {title} ({imdb_id})")
-                    new_release_date = 'Unknown'
-                    new_physical_release_date = None
-                    new_theatrical_release_date = None
-                else:
-                    logging.info("Getting release date, physical release date, and theatrical release date")
-                    fetched_release_date = get_release_date(metadata, imdb_id)
-                    new_physical_release_date = get_physical_release_date(imdb_id)
-                    new_theatrical_release_date = get_theatrical_release_date(imdb_id)
-                    logging.info(f"Physical release date: {new_physical_release_date}")
-                    logging.info(f"Theatrical release date: {new_theatrical_release_date}")
+                dataset_movie = get_movie_by_imdb(imdb_id)
+                dataset_used = False
+                if dataset_movie:
+                    dataset_title = dataset_movie.get('title') or dataset_movie.get('original_title')
+                    if dataset_title and (not title or title == 'Unknown Title'):
+                        title = dataset_title
 
-                    if fetched_release_date == 'Unknown':
-                        new_release_date = 'Unknown'
-                        logging.warning(f"Fetched release date was 'Unknown' for {title} ({imdb_id}), replacing any existing release date with 'Unknown'")
+                    dataset_release_date = dataset_movie.get('release_date')
+                    if dataset_release_date and is_valid_date_str(dataset_release_date):
+                        new_release_date = dataset_release_date
+                        dataset_used = True
+                        logging.info(f"Using dataset release date {dataset_release_date} for {title} ({imdb_id})")
                     else:
-                        new_release_date = fetched_release_date
+                        logging.debug(f"Dataset entry for {imdb_id} missing valid release date, falling back to API")
+
+                if dataset_used:
+                    new_physical_release_date = item_dict.get('physical_release_date')
+                    new_theatrical_release_date = item_dict.get('theatrical_release_date')
+                else:
+                    metadata, source = DirectAPI.get_movie_metadata(imdb_id)
+                    if not metadata:
+                        logging.warning(f"No metadata found for movie {title} ({imdb_id})")
+                        new_release_date = 'Unknown'
+                        new_physical_release_date = None
+                        new_theatrical_release_date = None
+                    else:
+                        logging.info("Getting release date, physical release date, and theatrical release date")
+                        fetched_release_date = get_release_date(metadata, imdb_id)
+                        new_physical_release_date = get_physical_release_date(imdb_id)
+                        new_theatrical_release_date = get_theatrical_release_date(imdb_id)
+                        logging.info(f"Physical release date: {new_physical_release_date}")
+                        logging.info(f"Theatrical release date: {new_theatrical_release_date}")
+
+                        if fetched_release_date == 'Unknown':
+                            new_release_date = 'Unknown'
+                            logging.warning(f"Fetched release date was 'Unknown' for {title} ({imdb_id}), replacing any existing release date with 'Unknown'")
+                        else:
+                            new_release_date = fetched_release_date
 
                 item_dict['early_release_original'] = item_dict.get('early_release', False)
                 item_dict['physical_release_date_original'] = item_dict.get('physical_release_date')
