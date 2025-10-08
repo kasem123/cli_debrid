@@ -8,6 +8,7 @@ import uuid
 import ctypes
 import platform
 import gc
+from typing import Dict
 # *** START EDIT: Import tracemalloc ***
 try:
     import tracemalloc
@@ -141,37 +142,43 @@ class ProgramRunner:
         self.connectivity_failure_time = None
         self.connectivity_retry_count = 0 # This will now primarily be for logging/timing, actual count in pause_info
         self.queue_paused = False
-        
+
+        # Executor configuration for APScheduler
+        self.content_source_executor_name = 'content_source'
+        self.content_source_worker_count = 1
+
         # Configure scheduler timezone using the local timezone helper
         try:
             from metadata.metadata import _get_local_timezone # Added import
             tz = _get_local_timezone()
             logging.info(f"Initializing APScheduler with timezone: {tz.key}")
-            # --- START EDIT: Configure scheduler for sequential execution ---
-            executors = {
-                'default': ThreadPoolExecutor(max_workers=1)
-            }
+            # --- START EDIT: Configure scheduler executors ---
+            executors = self._build_scheduler_executors()
             job_defaults = {
                 'coalesce': True, # If multiple runs are missed, only run once
                 'max_instances': 1, # Already part of individual job scheduling, but good to have as default
                 'misfire_grace_time': None  # Allow jobs to run no matter how late
             }
             self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults, timezone=tz)
-            logging.info("APScheduler configured with a single worker thread for sequential job execution.")
+            logging.info(
+                "APScheduler configured with %d content-source worker(s) and a dedicated sequential executor.",
+                self.content_source_worker_count
+            )
             # --- END EDIT ---
         except Exception as e:
             logging.error(f"Failed to get local timezone for scheduler, using system default: {e}")
-            # --- START EDIT: Configure scheduler for sequential execution (fallback) ---
-            executors = {
-                'default': ThreadPoolExecutor(max_workers=1)
-            }
+            # --- START EDIT: Configure scheduler executors (fallback) ---
+            executors = self._build_scheduler_executors()
             job_defaults = {
                 'coalesce': True,
                 'max_instances': 1,
                 'misfire_grace_time': None  # Allow jobs to run no matter how late
             }
             self.scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults) # Fallback to default timezone
-            logging.info("APScheduler configured with a single worker thread for sequential job execution (using system default timezone).")
+            logging.info(
+                "APScheduler configured with %d content-source worker(s) and a dedicated sequential executor (using system default timezone).",
+                self.content_source_worker_count
+            )
             # --- END EDIT ---
 
         # self.scheduler_lock = threading.Lock() # Previous version
@@ -844,6 +851,48 @@ class ProgramRunner:
         self._log_per_run_cpu = os.environ.get('LOG_PER_RUN_CPU', 'false').lower() == 'true'
         # --- END EDIT ---
 
+    def _get_content_source_worker_count(self) -> int:
+        """Return the configured worker count for content-source tasks with validation."""
+        default_workers = 6
+        configured_value = get_setting('Performance', 'content_source_workers', default_workers)
+        try:
+            workers = int(configured_value)
+        except (TypeError, ValueError):
+            logging.warning(
+                "Invalid content_source_workers value '%s'; using default of %d workers.",
+                configured_value,
+                default_workers
+            )
+            workers = default_workers
+
+        if workers < 1:
+            logging.warning(
+                "content_source_workers value %d is below the minimum of 1. Clamping to 1 worker.",
+                workers
+            )
+            workers = 1
+        elif workers > 16:
+            logging.warning(
+                "content_source_workers value %d exceeds the supported maximum of 16. Clamping to 16 workers.",
+                workers
+            )
+            workers = 16
+
+        return workers
+
+    def _build_scheduler_executors(self) -> Dict[str, ThreadPoolExecutor]:
+        """Create the APScheduler executors using the configured worker count."""
+        workers = self._get_content_source_worker_count()
+        self.content_source_worker_count = workers
+        logging.info(
+            "Content-source tasks will run with %d parallel worker(s).",
+            workers
+        )
+        return {
+            'default': ThreadPoolExecutor(max_workers=1),
+            self.content_source_executor_name: ThreadPoolExecutor(max_workers=workers)
+        }
+
     # *** START EDIT: New method to get task target ***
     def _get_task_target(self, task_name: str):
         """Resolves the target function and arguments for a given task name."""
@@ -851,6 +900,7 @@ class ProgramRunner:
         args = []
         kwargs = {}
         task_type_determined = "Unknown"
+        executor_name = 'default'
 
         # 1. Queue Processing Tasks (using the map)
         if task_name in self.queue_processing_map:
@@ -873,6 +923,7 @@ class ProgramRunner:
             if source_data:
                 target_func = self.process_content_source
                 args = [source_id, source_data]
+                executor_name = self.content_source_executor_name
             else:
                 logging.warning(f"Content source data not found for source ID '{source_id}' derived from task '{task_name}'. This task will be skipped.")
 
@@ -890,7 +941,7 @@ class ProgramRunner:
             logging.error(f"Unknown task type or name format for task resolution: '{task_name}'")
 
         logging.debug(f"Resolved task '{task_name}' as Type: {task_type_determined}")
-        return target_func, args, kwargs
+        return target_func, args, kwargs, executor_name
     # *** END EDIT ***
 
 
@@ -923,7 +974,7 @@ class ProgramRunner:
                         return False
 
                 # --- Resolve target function using helper ---
-                target_func, args, kwargs = self._get_task_target(task_name)
+                target_func, args, kwargs, executor_name = self._get_task_target(task_name)
                 # ------------------------------------------
 
                 if target_func:
@@ -951,7 +1002,8 @@ class ProgramRunner:
                             max_instances=1,
                             # *** END EDIT ***
                             # *** START EDIT: Add timezone argument ***
-                            timezone=resolved_timezone
+                            timezone=resolved_timezone,
+                            executor=executor_name
                             # *** END EDIT ***
                         )
                         # *** START EDIT: Updated log message ***
@@ -1004,7 +1056,7 @@ class ProgramRunner:
                     if is_content_source_task_pattern:
                         # Confirm the failure was due to a missing content source by re-checking _get_task_target's outcome.
                         # _get_task_target logs its own warning if the source_id is not found.
-                        target_func_check, _, _ = self._get_task_target(task_name)
+                        target_func_check, _, _, _ = self._get_task_target(task_name)
                         if target_func_check is None:
                             logging.warning(
                                 f"Obsolete task toggle found for missing content source: '{task_name}'. "
@@ -3728,7 +3780,7 @@ class ProgramRunner:
 
         logging.info(f"Attempting to manually trigger task: {job_id_base} by adding it to APScheduler queue.")
 
-        target_func, args, kwargs = self._get_task_target(job_id_base)
+        target_func, args, kwargs, executor_name = self._get_task_target(job_id_base)
 
         if target_func:
             try:
@@ -3768,7 +3820,8 @@ class ProgramRunner:
                         name=f"Manual run of {job_id_base}",
                         replace_existing=False, # Should be false for unique IDs
                         max_instances=1, # Max instances for this specific job ID
-                        misfire_grace_time=60 # Allow 1 minute grace time for manual tasks
+                        misfire_grace_time=60, # Allow 1 minute grace time for manual tasks
+                        executor=executor_name
                     )
                         
                     logging.info(f"Task '{job_id_base}' (Manual Job ID: {manual_job_instance_id}) successfully queued for immediate execution via APScheduler.")
@@ -5573,9 +5626,9 @@ def _setup_scheduler_listeners(runner_instance):
             logging.error(f"[_setup_scheduler_listeners] Failed to get local timezone for scheduler, using UTC fallback: {e_tz}")
             tz = pytz.utc
 
-        executors = {'default': ThreadPoolExecutor(max_workers=1)}
-        job_defaults = {'coalesce': True, 'max_instances': 1}
-        
+        executors = runner_instance._build_scheduler_executors()
+        job_defaults = {'coalesce': True, 'max_instances': 1, 'misfire_grace_time': None}
+
         try:
             new_scheduler = BackgroundScheduler(
                 executors=executors,
@@ -5585,8 +5638,12 @@ def _setup_scheduler_listeners(runner_instance):
             runner_instance.scheduler = new_scheduler
             scheduler_recreated = True
             # Mark listeners as NOT setup for this new scheduler instance
-            runner_instance.initial_listeners_setup_complete = False 
-            logging.info(f"[_setup_scheduler_listeners] New BackgroundScheduler CREATED and ASSIGNED. New scheduler ID: {id(runner_instance.scheduler)}.")
+            runner_instance.initial_listeners_setup_complete = False
+            logging.info(
+                "[_setup_scheduler_listeners] New BackgroundScheduler CREATED and ASSIGNED with %d content-source worker(s). New scheduler ID: %s.",
+                runner_instance.content_source_worker_count,
+                id(runner_instance.scheduler)
+            )
         except Exception as e_create_scheduler:
             logging.error(f"[_setup_scheduler_listeners] FAILED to create new BackgroundScheduler: {e_create_scheduler}", exc_info=True)
             runner_instance.scheduler = None # Ensure it's None if creation failed

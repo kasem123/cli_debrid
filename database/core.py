@@ -181,10 +181,20 @@ def get_db_connection(db_path=None):
         db_content_dir = os.environ.get('USER_DB_CONTENT', '/user/db_content')
         db_path = os.path.join(db_content_dir, 'media_items.db')
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=10)  # Increased timeout slightly
-    conn.execute('PRAGMA journal_mode=WAL')  # Enable WAL mode
+    conn = sqlite3.connect(db_path, timeout=30)  # Allow longer wait before raising lock errors
     conn.row_factory = sqlite3.Row
-    
+
+    # Apply performance-oriented PRAGMAs. Failures are logged but not fatal.
+    try:
+        conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('PRAGMA synchronous=NORMAL')
+        conn.execute('PRAGMA temp_store=MEMORY')
+        conn.execute('PRAGMA cache_size=-32768')  # Allocate ~32MB page cache in memory
+        conn.execute('PRAGMA wal_autocheckpoint=1000')
+        conn.execute('PRAGMA busy_timeout=5000')
+    except sqlite3.Error as pragma_error:
+        logging.debug(f"PRAGMA configuration failed on connection to {db_path}: {pragma_error}")
+
     # REMOVED: Initialization moved to schema_management.py
     # if is_new_db:
     #     logging.info(f"New database created at {db_path}. Ensure schema is initialized/migrated.")

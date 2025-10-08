@@ -312,6 +312,16 @@ SETTINGS_SCHEMA = {
             "min": 0
         }
     },
+    "Performance": {
+        "tab": "Additional Settings",
+        "content_source_workers": {
+            "type": "integer",
+            "description": "Number of parallel workers dedicated to fetching and processing wanted content from enabled sources. Increase to ingest watchlists faster; decrease to limit CPU and database load.",
+            "default": 6,
+            "min": 1,
+            "max": 16
+        }
+    },
     "Scraping": {
         "tab": "Versions",
         "uncached_content_handling": {

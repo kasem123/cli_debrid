@@ -13,5 +13,18 @@
             </select>
             <p class="settings-description">Set the logging level for the application.</p>
         </div>
+        <div class="settings-form-group">
+            <label for="content_source_workers" class="settings-title">Content Source Workers:</label>
+            <input type="number"
+                   id="content_source_workers"
+                   name="content_source_workers"
+                   class="settings-input"
+                   min="1"
+                   max="16"
+                   value="{{ settings.content_source_workers }}">
+            <p class="settings-description">
+                Configure how many parallel workers Battery should request for fetching and processing wanted content. Higher values speed up watchlist ingestion but increase CPU and database load.
+            </p>
+        </div>
     </div>
 </div>

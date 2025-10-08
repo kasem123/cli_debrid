@@ -9,7 +9,7 @@ import shutil # Added for backup
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from utilities.settings import get_setting
+from utilities.settings import get_setting, set_setting
 
 class Settings:
     def __init__(self):
@@ -33,6 +33,7 @@ class Settings:
         # Threaded retry configuration for 500 errors
         self.enable_threaded_retries = True
         self.max_threaded_retry_workers = 5
+        self.content_source_workers = 6
         self.load()
 
     @property
@@ -155,6 +156,7 @@ class Settings:
             # Threaded retry configuration
             'enable_threaded_retries': self.enable_threaded_retries,
             'max_threaded_retry_workers': self.max_threaded_retry_workers,
+            'content_source_workers': self.content_source_workers,
         }
         try:
             # Ensure the directory exists
@@ -219,6 +221,12 @@ class Settings:
         # Load threaded retry configuration
         self.enable_threaded_retries = config.get('enable_threaded_retries', True)
         self.max_threaded_retry_workers = config.get('max_threaded_retry_workers', 5)
+        try:
+            workers = int(get_setting('Performance', 'content_source_workers', self.content_source_workers))
+        except (TypeError, ValueError):
+            logger.warning("Invalid content_source_workers value in main config; using existing battery value %s.", self.content_source_workers)
+            workers = self.content_source_workers
+        self.content_source_workers = max(1, min(16, workers))
 
     def get_all(self):
         return {
@@ -233,6 +241,7 @@ class Settings:
             # Threaded retry configuration
             "enable_threaded_retries": self.enable_threaded_retries,
             "max_threaded_retry_workers": self.max_threaded_retry_workers,
+            "content_source_workers": self.content_source_workers,
         }
 
     def update(self, new_settings):
@@ -258,6 +267,21 @@ class Settings:
             # Then we update the cached dictionary
             self.Trakt['client_id'] = new_settings.get('Trakt[client_id]', self.Trakt['client_id'])
             self.Trakt['client_secret'] = new_settings.get('Trakt[client_secret]', self.Trakt['client_secret'])
+
+        if 'content_source_workers' in new_settings:
+            try:
+                workers_value = int(new_settings['content_source_workers'])
+            except (TypeError, ValueError):
+                logger.warning("Received invalid content_source_workers value '%s' via settings update.", new_settings['content_source_workers'])
+            else:
+                workers_value = max(1, min(16, workers_value))
+                if workers_value != self.content_source_workers:
+                    logger.info("Updating content_source_workers to %d via battery settings.", workers_value)
+                self.content_source_workers = workers_value
+                try:
+                    set_setting('Performance', 'content_source_workers', workers_value)
+                except Exception as set_err:
+                    logger.error("Failed to persist content_source_workers to main config: %s", set_err)
 
         # Save settings to file
         self.save() # Saves the current state of this object to settings.json
